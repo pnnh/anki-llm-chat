@@ -12,6 +12,6 @@
     "font_size": 12,
     "panel_width": 400,
     "preview_enabled": false,
-    "preview_url": "http://localhost:8000/{word}",
-    "preview_field": "word"
+    "preview_url": "http://localhost:8000/?word={word}",
+    "preview_field": "word,Front"
 }

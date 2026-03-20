@@ -1,5 +1,6 @@
 """Chat panel – dockable side panel with streaming markdown chat."""
 
+import datetime
 import os
 import urllib.parse
 
@@ -98,6 +99,9 @@ QPushButton#settingsBtn {{
     padding: 0;
 }}
 QPushButton#settingsBtn:hover {{ color: #555; }}
+QSplitter::handle:vertical {{
+    background-color: #d4d4d4;
+}}
 """
 
 # ---------------------------------------------------------------------------
@@ -252,6 +256,8 @@ class ChatPanel(QDockWidget):
         self._collapsed = False
         self._expanded_width: int | None = None
         self._current_card = None
+        self._preview_loading_real_url: bool = False
+        self._preview_last_url: str = ""
 
         self._build_ui()
         self._apply_style()
@@ -382,26 +388,29 @@ class ChatPanel(QDockWidget):
             self._splitter.setSizes([preview, total - preview])
 
     def _on_preview_load(self, ok: bool):
-        """Called when the preview pane finishes loading a URL or HTML."""
-        if not ok and self._preview_web.isVisible():
-            self._load_preview_error(
-                "Failed to load URL \u2014 check your connection or URL template."
+        """Called when the preview pane finishes loading a URL or HTML.
+
+        Only acts on intentional URL navigations (flagged by _load_preview).
+        Sub-resource failures (CSS, images) do not replace the page.
+        """
+        if not self._preview_loading_real_url:
+            # setHtml loads (empty placeholder etc.) – ignore completely
+            return
+        self._preview_loading_real_url = False
+        if not ok:
+            self._log_preview_error(
+                f"Failed to load URL: {self._preview_last_url}"
             )
 
-    def _load_preview_error(self, msg: str):
-        """Show a styled error message inside the preview pane."""
-        escaped = (
-            msg.replace("&", "&amp;")
-               .replace("<", "&lt;")
-               .replace(">", "&gt;")
-               .replace("\n", "<br>")
-        )
-        html = (
-            '<html><body style="margin:12px;font-family:-apple-system,sans-serif;'
-            'font-size:12px;color:#c62828;background:#fff8f8;">'
-            '<b>Preview error</b><br><br>' + escaped + '</body></html>'
-        )
-        self._preview_web.setHtml(html)
+    def _log_preview_error(self, msg: str):
+        """Append a preview error entry to Logs.txt in the add-on directory."""
+        try:
+            log_path = os.path.join(_ADDON_DIR, "Logs.txt")
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(f"[{timestamp}] {msg}\n")
+        except Exception:
+            pass  # never surface a logging failure into Anki
 
     def _apply_style(self):
         conf = self._conf()
@@ -526,9 +535,8 @@ class ChatPanel(QDockWidget):
         raw_field_conf = (conf.get("preview_field", "") or "").strip()
         candidate_fields = [f.strip() for f in raw_field_conf.split(",") if f.strip()]
         if not url_template:
-            self._load_preview_error(
-                "No URL template configured.\n"
-                "Open \u2699 Settings and set a Preview URL."
+            self._log_preview_error(
+                "No URL template configured. Open Settings and set a Preview URL."
             )
             return
 
@@ -541,7 +549,7 @@ class ChatPanel(QDockWidget):
             field_names = [f["name"] for f in model_obj.get("flds", [])]
             field_map = dict(zip(field_names, note.fields))
         except Exception as e:
-            self._load_preview_error(f"Failed to read card fields: {e}")
+            self._log_preview_error(f"Failed to read card fields: {e}")
             return
 
         # Try each candidate field in order
@@ -559,15 +567,17 @@ class ChatPanel(QDockWidget):
         if not word:
             available = ", ".join(field_names) if field_names else "(none)"
             tried = ", ".join(candidate_fields) if candidate_fields else "(none)"
-            self._load_preview_error(
-                f'No usable value found in fields: {tried}\n'
-                f'Available fields: {available}'
+            self._log_preview_error(
+                f"No usable value found in fields: {tried}. "
+                f"Available fields: {available}"
             )
             return
 
         # Build the final URL by substituting the {word} placeholder
         encoded = urllib.parse.quote(word, safe="")
         url = url_template.replace("{word}", encoded)
+        self._preview_loading_real_url = True
+        self._preview_last_url = url
         self._preview_web.load(QUrl(url))
 
     # -- send / stream -----------------------------------------------------
