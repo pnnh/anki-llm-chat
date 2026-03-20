@@ -22,7 +22,7 @@ def _setup():
     # -- reviewer hooks ----------------------------------------------------
 
     def on_question(card):
-        panel.on_new_card(extract_context(card, answer_shown=False))
+        panel.on_new_card(extract_context(card, answer_shown=False), card=card)
         panel.sync_bottom_height()
 
     def on_answer(card):

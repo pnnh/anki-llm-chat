@@ -1,6 +1,7 @@
 """Chat panel – dockable side panel with streaming markdown chat."""
 
 import os
+import urllib.parse
 
 from aqt import mw
 from aqt.qt import (
@@ -11,6 +12,7 @@ from aqt.qt import (
     QLineEdit,
     QPalette,
     QPushButton,
+    QSplitter,
     QTimer,
     QUrl,
     QVBoxLayout,
@@ -24,6 +26,7 @@ except ImportError:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
 
 from .api_client import StreamWorker
+from .card_context import clean_field
 
 _ADDON_DIR = os.path.dirname(__file__)
 
@@ -217,6 +220,11 @@ def _js(s):
     )
 
 
+_PREVIEW_EMPTY_HTML = (
+    '<html><body style="margin:0;padding:0;background:#fff;"></body></html>'
+)
+
+
 # ---------------------------------------------------------------------------
 # ChatPanel
 # ---------------------------------------------------------------------------
@@ -243,6 +251,7 @@ class ChatPanel(QDockWidget):
         self._web_ready = False
         self._collapsed = False
         self._expanded_width: int | None = None
+        self._current_card = None
 
         self._build_ui()
         self._apply_style()
@@ -303,22 +312,38 @@ class ChatPanel(QDockWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Web view for markdown chat
         conf = self._conf()
-        self._web = QWebEngineView()
+
+        # Vertical splitter: preview (top) + chat (bottom)
+        self._splitter = QSplitter(Qt.Orientation.Vertical)
+        self._splitter.setHandleWidth(3)
+        self._splitter.setChildrenCollapsible(True)
+        layout.addWidget(self._splitter, stretch=1)
+
+        # Top pane: word preview web view
+        self._preview_web = QWebEngineView()
+        self._preview_web.setHtml(_PREVIEW_EMPTY_HTML)
+        self._preview_web.loadFinished.connect(self._on_preview_load)
+        self._splitter.addWidget(self._preview_web)
+
+        # Bottom pane: markdown chat web view
         provider = conf.get("provider", "openrouter")
         provider_label = self._provider_label(provider)
-        html = (
+        chat_html = (
             _CHAT_HTML
             .replace("FONT_SIZE", str(conf.get("font_size", 12)))
             .replace("PROVIDER_NAME", provider_label)
             .replace("MODEL_NAME", self._active_model(conf))
         )
-        self._web.setHtml(html, QUrl.fromLocalFile(_ADDON_DIR + "/"))
+        self._web = QWebEngineView()
+        self._web.setHtml(chat_html, QUrl.fromLocalFile(_ADDON_DIR + "/"))
         self._web.loadFinished.connect(self._on_web_ready)
-        layout.addWidget(self._web, stretch=1)
+        self._splitter.addWidget(self._web)
 
-        # Bottom input bar
+        # Apply initial preview visibility
+        self._update_preview_visibility(conf)
+
+        # Bottom input bar (outside splitter, always visible)
         self._input_bar = QWidget()
         self._input_bar.setObjectName("inputBar")
         row = QHBoxLayout(self._input_bar)
@@ -339,6 +364,44 @@ class ChatPanel(QDockWidget):
 
         layout.addWidget(self._input_bar)
         self.setWidget(container)
+
+    def _update_preview_visibility(self, conf):
+        """Show or hide the preview pane based on config."""
+        enabled = conf.get("preview_enabled", False)
+        self._preview_web.setVisible(enabled)
+        if enabled:
+            # Defer sizing until Qt has performed layout
+            QTimer.singleShot(0, self._fix_splitter_sizes)
+            QTimer.singleShot(300, self._fix_splitter_sizes)
+
+    def _fix_splitter_sizes(self):
+        """Set splitter proportions after the widget has been laid out."""
+        total = self._splitter.height()
+        if total > 50:
+            preview = total // 3
+            self._splitter.setSizes([preview, total - preview])
+
+    def _on_preview_load(self, ok: bool):
+        """Called when the preview pane finishes loading a URL or HTML."""
+        if not ok and self._preview_web.isVisible():
+            self._load_preview_error(
+                "Failed to load URL \u2014 check your connection or URL template."
+            )
+
+    def _load_preview_error(self, msg: str):
+        """Show a styled error message inside the preview pane."""
+        escaped = (
+            msg.replace("&", "&amp;")
+               .replace("<", "&lt;")
+               .replace(">", "&gt;")
+               .replace("\n", "<br>")
+        )
+        html = (
+            '<html><body style="margin:12px;font-family:-apple-system,sans-serif;'
+            'font-size:12px;color:#c62828;background:#fff8f8;">'
+            '<b>Preview error</b><br><br>' + escaped + '</body></html>'
+        )
+        self._preview_web.setHtml(html)
 
     def _apply_style(self):
         conf = self._conf()
@@ -379,6 +442,9 @@ class ChatPanel(QDockWidget):
             provider = conf.get("provider", "openrouter")
             provider_label = self._provider_label(provider)
             self._js(f'setProvider("{_js(provider_label)}");')
+            self._update_preview_visibility(conf)
+            if not self._collapsed:
+                self._load_preview(self._current_card, conf)
 
     # -- collapse / expand -------------------------------------------------
 
@@ -389,9 +455,11 @@ class ChatPanel(QDockWidget):
             self._settings_btn.show()
             self._input.show()
             self._send_btn.show()
+            conf = self._conf()
+            self._update_preview_visibility(conf)
             self.setMinimumWidth(280)
             self.setMaximumWidth(800)
-            w = self._expanded_width or self._conf().get("panel_width", 400)
+            w = self._expanded_width or conf.get("panel_width", 400)
             self.resize(w, self.height())
             self._toggle_btn.setText("\u2715")
             self._toggle_btn.setObjectName("toggleBtn")
@@ -403,6 +471,7 @@ class ChatPanel(QDockWidget):
             self._settings_btn.hide()
             self._input.hide()
             self._send_btn.hide()
+            self._preview_web.setVisible(False)
             self.setMinimumWidth(34)
             self.setMaximumWidth(34)
             self._toggle_btn.setText("\u276E")
@@ -428,9 +497,10 @@ class ChatPanel(QDockWidget):
 
     # -- card context ------------------------------------------------------
 
-    def on_new_card(self, context: str):
-        """New card shown – clear chat, update context."""
+    def on_new_card(self, context: str, card=None):
+        """New card shown – clear chat, update context, load word preview."""
         self._card_context = context
+        self._current_card = card
         self._cancel_stream()
         self._messages.clear()
         self._js("clearChat();")
@@ -440,10 +510,65 @@ class ChatPanel(QDockWidget):
         provider = conf.get("provider", "openrouter")
         provider_label = self._provider_label(provider)
         self._js(f'setProvider("{_js(provider_label)}");')
+        self._load_preview(card, conf)
 
     def on_answer_shown(self, context: str):
         """Answer revealed – update context, keep chat history."""
         self._card_context = context
+
+    def _load_preview(self, card, conf):
+        """Navigate the preview pane to the configured URL for the current word."""
+        if not conf.get("preview_enabled", False) or card is None:
+            return
+
+        url_template = conf.get("preview_url", "").strip()
+        # Support comma-separated list of field names; try each in order
+        raw_field_conf = (conf.get("preview_field", "") or "").strip()
+        candidate_fields = [f.strip() for f in raw_field_conf.split(",") if f.strip()]
+        if not url_template:
+            self._load_preview_error(
+                "No URL template configured.\n"
+                "Open \u2699 Settings and set a Preview URL."
+            )
+            return
+
+        # Extract the target field value and clean it to plain text
+        field_names = []
+        field_map = {}
+        try:
+            note = card.note()
+            model_obj = note.model()
+            field_names = [f["name"] for f in model_obj.get("flds", [])]
+            field_map = dict(zip(field_names, note.fields))
+        except Exception as e:
+            self._load_preview_error(f"Failed to read card fields: {e}")
+            return
+
+        # Try each candidate field in order
+        word = ""
+        for candidate in candidate_fields:
+            if candidate in field_map:
+                word = clean_field(field_map[candidate])
+                if word:
+                    break
+
+        # Fall back to the first field if nothing found
+        if not word and field_names:
+            word = clean_field(field_map.get(field_names[0], ""))
+
+        if not word:
+            available = ", ".join(field_names) if field_names else "(none)"
+            tried = ", ".join(candidate_fields) if candidate_fields else "(none)"
+            self._load_preview_error(
+                f'No usable value found in fields: {tried}\n'
+                f'Available fields: {available}'
+            )
+            return
+
+        # Build the final URL by substituting the {word} placeholder
+        encoded = urllib.parse.quote(word, safe="")
+        url = url_template.replace("{word}", encoded)
+        self._preview_web.load(QUrl(url))
 
     # -- send / stream -----------------------------------------------------
 
@@ -557,3 +682,5 @@ class ChatPanel(QDockWidget):
         self._messages.clear()
         self._js("clearChat();")
         self._card_context = ""
+        self._current_card = None
+        self._preview_web.setHtml(_PREVIEW_EMPTY_HTML)

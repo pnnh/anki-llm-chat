@@ -2,10 +2,12 @@
 
 from aqt import mw
 from aqt.qt import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -140,6 +142,19 @@ class ConfigDialog(QDialog):
 
         layout.addLayout(form)
 
+        # Word Preview section
+        preview_group = QGroupBox("Word Preview")
+        preview_form = QFormLayout(preview_group)
+        self.preview_enabled_check = QCheckBox("Enable preview pane")
+        preview_form.addRow("", self.preview_enabled_check)
+        self.preview_url_edit = QLineEdit()
+        self.preview_url_edit.setPlaceholderText("http://example.com/search?word={word}")
+        preview_form.addRow("URL Template:", self.preview_url_edit)
+        self.preview_field_edit = QLineEdit()
+        self.preview_field_edit.setPlaceholderText("Front")
+        preview_form.addRow("Field Name:", self.preview_field_edit)
+        layout.addWidget(preview_group)
+
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         cancel_btn = QPushButton("Cancel")
@@ -229,6 +244,10 @@ class ConfigDialog(QDialog):
         self.temp_spin.setValue(conf.get("temperature", 0.7))
         self.font_size_spin.setValue(conf.get("font_size", 12))
         self.panel_width_spin.setValue(conf.get("panel_width", 400))
+
+        self.preview_enabled_check.setChecked(conf.get("preview_enabled", False))
+        self.preview_url_edit.setText(conf.get("preview_url", ""))
+        self.preview_field_edit.setText(conf.get("preview_field", "Front"))
 
         # Set initial visibility
         self._on_provider_changed()
@@ -324,5 +343,8 @@ class ConfigDialog(QDialog):
         conf["temperature"] = self.temp_spin.value()
         conf["font_size"] = self.font_size_spin.value()
         conf["panel_width"] = self.panel_width_spin.value()
+        conf["preview_enabled"] = self.preview_enabled_check.isChecked()
+        conf["preview_url"] = self.preview_url_edit.text().strip()
+        conf["preview_field"] = self.preview_field_edit.text().strip() or "Front"
         mw.addonManager.writeConfig(MODULE, conf)
         self.accept()
